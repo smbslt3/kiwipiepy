@@ -1054,3 +1054,58 @@ def test_issue_216():
     tokens = kiwi.tokenize("테스트용\ufeff문자열입니다.")
     for token in tokens:
         assert token.form
+
+
+def test_just_split_returns_source_forms():
+    kiwi = Kiwi()
+    cases = {
+        '했다': ['했', '다'],
+        '하였다': ['하', '였', '다'],
+        '귀여워요': ['귀여워요'],
+        '걸어': ['걸', '어'],
+        '학생입니다': ['학생', '입니다'],
+    }
+    for text, expected in cases.items():
+        assert kiwi.tokenize(text, just_split=True) == expected
+
+    assert kiwi.tokenize('시곗바늘', just_split=True, saisiot=True) == ['시곗', '바늘']
+
+
+def test_just_split_preserves_non_whitespace_source():
+    kiwi = Kiwi()
+    text = ' \t😀했다  안녕\n'
+    parts = kiwi.tokenize(text, just_split=True)
+    assert parts == ['😀', '했', '다', '안녕']
+    assert ''.join(parts) == re.sub(r'\s+', '', text)
+
+    parts = kiwi.tokenize(
+        '😀BC',
+        pretokenized=[(0, 1, [PretokenizedToken('X', 'NNP', 0, 1)])],
+        just_split=True,
+    )
+    assert parts == ['😀', 'BC']
+
+
+def test_just_split_iterable_and_echo():
+    kiwi = Kiwi()
+    texts = ['했다', '😀하였다', '']
+    assert list(kiwi.tokenize(iter(texts), just_split=True)) == [
+        ['했', '다'],
+        ['😀', '하', '였', '다'],
+        [],
+    ]
+    assert list(kiwi.tokenize(iter(texts), just_split=True, echo=True)) == [
+        (['했', '다'], '했다'),
+        (['😀', '하', '였', '다'], '😀하였다'),
+        ([], ''),
+    ]
+
+
+def test_just_split_rejects_token_only_options():
+    kiwi = Kiwi()
+    for kwargs in ({'split_sents': True}, {'stopwords': Stopwords()}):
+        try:
+            kiwi.tokenize('했다', just_split=True, **kwargs)
+        except ValueError:
+            continue
+        raise AssertionError('expected ValueError')

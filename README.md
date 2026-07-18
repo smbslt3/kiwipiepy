@@ -65,6 +65,10 @@ Kiwi에서 사용하는 품사 태그는 세종 말뭉치의 품사 태그를 �
  Token(form='ᆸ니다', tag='EF', start=17, len=2),
  Token(form='.', tag='SF', start=19, len=1)]
 
+# 분석 경계는 유지하면서 원문의 표면형 문자열만 반환합니다.
+>>> kiwi.tokenize("했다", just_split=True)
+['했', '다']
+
 # normalize_coda 옵션을 사용하면 
 # 덧붙은 받침 때문에 분석이 깨지는 경우를 방지할 수 있습니다.
 >>> kiwi.tokenize("ㅋㅋㅋ 이런 것도 분석이 될까욬ㅋㅋ?", normalize_coda=True)
@@ -761,7 +765,7 @@ kiwi을 생성하고, 사용자 사전에 단어를 추가하는 작업이 완�
 형태소 분석, 문장 분리, 띄어쓰기 교정, 문장 복원 등의 작업을 수행할 수 있습니다.
 
 ```python
-Kiwi.tokenize(text, match_option, normalize_coda=False, z_coda=True, split_complex=False, compatible_jamo=False, saisiot=None, blocklist=None, allowed_dialects='standard', dialect_cost=3.0, oov_handling=None, typos=None, typo_cost_threshold=2.5)
+Kiwi.tokenize(text, match_option, normalize_coda=False, z_coda=True, split_complex=False, compatible_jamo=False, saisiot=None, blocklist=None, allowed_dialects='standard', dialect_cost=3.0, oov_handling=None, typos=None, typo_cost_threshold=2.5, just_split=False)
 Kiwi.analyze(text, top_n, match_option, normalize_coda=False, z_coda=True, split_complex=False, compatible_jamo=False, saisiot=None, blocklist=None, allowed_dialects='standard', dialect_cost=3.0, oov_handling=None, typos=None, typo_cost_threshold=2.5)
 Kiwi.split_into_sents(text, match_options=Match.ALL, normalize_coda=False, z_coda=True, split_complex=False, compatible_jamo=False, saisiot=None, blocklist=None, allowed_dialects='standard', dialect_cost=3.0, return_tokens=False)
 Kiwi.glue(text_chunks, insert_new_lines=None, return_space_insertions=False)
@@ -771,7 +775,7 @@ Kiwi.template(format_str, cache=True)
 ``` 
 
 <details>
-<summary><code>tokenize(text, match_option=Match.ALL, normalize_coda=False, z_coda=True, split_complex=False, compatible_jamo=False, saisiot=None, blocklist=None, allowed_dialects='standard', dialect_cost=3.0, oov_handling=None, typos=None, typo_cost_threshold=2.5)</code></summary>
+<summary><code>tokenize(text, match_option=Match.ALL, normalize_coda=False, z_coda=True, split_complex=False, compatible_jamo=False, saisiot=None, blocklist=None, allowed_dialects='standard', dialect_cost=3.0, oov_handling=None, typos=None, typo_cost_threshold=2.5, just_split=False)</code></summary>
  
 입력된 `text`를 형태소 분석하여 그 결과를 간단하게 반환합니다. 분석결과는 다음과 같이 `Token`의 리스트 형태로 반환됩니다.
 
@@ -779,6 +783,10 @@ Kiwi.template(format_str, cache=True)
 >> kiwi.tokenize('테스트입니다.')
 [Token(form='테스트', tag='NNG', start=0, len=3), Token(form='이', tag='VCP', start=3, len=1), Token(form='ᆸ니다', tag='EF', start=4, len=2)]
 ```
+
+`just_split=True`이면 정규화된 형태소 대신 원문 표면형 문자열을 반환합니다.
+예를 들어 `했다`의 분석 결과 `하/VV + 었/EP + 다/EF`는 `['했', '다']`가 됩니다.
+공백은 일반 `tokenize`와 같이 결과에서 제외됩니다.
 
 `normalize_coda`는 ㅋㅋㅋ,ㅎㅎㅎ와 같은 초성체가 뒤따라와서 받침으로 들어갔을때 분석에 실패하는 문제를 해결해줍니다.
 ```python

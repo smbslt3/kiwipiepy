@@ -1050,6 +1050,7 @@ struct TokenObject : py::CObject<TokenObject>
 	uint16_t _dialect = 0;
 	bool _regularity = false;
 	bool _oov = false;
+	bool _surfaceFormStart = false;
 
 	using _InitArgs = std::tuple<int>;
 	
@@ -1322,6 +1323,7 @@ py::UniqueObj resToPyList(vector<TokenResult>&& res, const KiwiObject* kiwiObj, 
 			tItem->_sentPosition = q.sentPosition;
 			tItem->_subSentPosition = q.subSentPosition;
 			tItem->_lineNumber = q.lineNumber;
+			tItem->_surfaceFormStart = q.isSurfaceFormStart;
 			tItem->_score = q.score;
 			tItem->_typoCost = q.typoCost;
 			tItem->_morph = q.morph;
@@ -3334,6 +3336,7 @@ PyMODINIT_FUNC PyInit__kiwipiepy()
 		.template property<&TokenObject::_sentPosition>("sent_position")
 		.template property<&TokenObject::_subSentPosition>("sub_sent_position")
 		.template property<&TokenObject::_lineNumber>("line_number")
+		.template property<&TokenObject::_surfaceFormStart>("_surface_form_start")
 		.template property<&TokenObject::baseForm>("base_form")
 		.template property<&TokenObject::baseId>("base_id")
 		.template property<&TokenObject::taggedForm>("tagged_form")

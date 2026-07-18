@@ -13,6 +13,44 @@ from kiwipiepy.utils import Stopwords
 from kiwipiepy.const import Match, Dialect
 from kiwipiepy.template import Template
 
+_MATCH_SURFACE_FORM = 1 << 28
+_NONSPACE_RE = re.compile(r'\S+')
+
+
+def _split_surface_forms(text: str, tokens: List[Token]) -> List[str]:
+    """Project analyzed token groups back onto the original text."""
+    spans = []
+    current = None
+    for token in tokens:
+        start = min(len(text), max(0, token.start))
+        end = min(len(text), max(start, token.end))
+        if token._surface_form_start or current is None:
+            if current is not None:
+                spans.append(current)
+            current = [start, end]
+        else:
+            current[0] = min(current[0], start)
+            current[1] = max(current[1], end)
+    if current is not None:
+        spans.append(current)
+
+    merged = []
+    for start, end in sorted(spans):
+        if merged and start < merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+
+    pieces = []
+    cursor = 0
+    for start, end in merged:
+        pieces.extend(_NONSPACE_RE.findall(text, cursor, start))
+        pieces.extend(_NONSPACE_RE.findall(text, start, end))
+        cursor = max(cursor, end)
+    pieces.extend(_NONSPACE_RE.findall(text, cursor))
+    return pieces
+
+
 class Sentence(NamedTuple):
     '''문장 분할 결과를 담기 위한 `namedtuple`입니다.'''
     text: str
@@ -1424,18 +1462,27 @@ with open('result.txt', 'w', encoding='utf-8') as output:
         typos: Optional[Union[str, TypoTransformer]] = None,
         typo_cost_threshold: float = 2.5,
         override_config:Optional[KiwiConfig] = None,
+        just_split:bool = False,
     ):
-        def _refine_result(results):
+        if just_split and split_sents:
+            raise ValueError("`just_split` does not support `split_sents`.")
+        if just_split and stopwords is not None:
+            raise ValueError("`just_split` does not support `stopwords`.")
+
+        def _refine_result(results, raw_input=None):
+            tokens = results[0][0]
+            if just_split:
+                return _split_surface_forms(raw_input, tokens)
             if not split_sents:
-                return results[0][0] if stopwords is None else stopwords.filter(results[0][0])
+                return tokens if stopwords is None else stopwords.filter(tokens)
             
-            tokens, _ = results[0]
             ret = [list(g) if stopwords is None else stopwords.filter(g) for k, g in itertools.groupby(tokens, key=lambda x:x.sent_position)]
             return ret
         
         def _refine_result_with_echo(arg):
             results, raw_input = arg
-            return _refine_result(results), raw_input
+            refined = _refine_result(results, raw_input)
+            return (refined, raw_input) if echo else refined
 
         if normalize_coda:
             match_options |= Match.NORMALIZING_CODA
@@ -1445,7 +1492,6 @@ with open('result.txt', 'w', encoding='utf-8') as output:
             match_options |= Match.SPLIT_COMPLEX
         if compatible_jamo:
             match_options |= Match.COMPATIBLE_JAMO
-        
         if saisiot is True:
             match_options = (match_options & ~Match.MERGE_SAISIOT) | Match.SPLIT_SAISIOT
         elif saisiot is False:
@@ -1453,6 +1499,8 @@ with open('result.txt', 'w', encoding='utf-8') as output:
 
         allowed_dialects = _convert_dialect(allowed_dialects)
         match_options |= _convert_oov_handling(oov_handling)
+        if just_split:
+            match_options |= _MATCH_SURFACE_FORM
         typos = _convert_typos(typos)
 
         if isinstance(blocklist, MorphemeSet):
@@ -1472,9 +1520,12 @@ with open('result.txt', 'w', encoding='utf-8') as output:
 
         if isinstance(text, str):
             echo = False
-            return _refine_result(super().analyze(text, 1, match_options, False, blocklist, open_ending, allowed_dialects, dialect_cost, typos, typo_cost_threshold, pretokenized, override_config))
-    
-        return map(_refine_result_with_echo if echo else _refine_result, super().analyze(text, 1, match_options, echo, blocklist, open_ending, allowed_dialects, dialect_cost, typos, typo_cost_threshold, pretokenized, override_config))
+            results = super().analyze(text, 1, match_options, False, blocklist, open_ending, allowed_dialects, dialect_cost, typos, typo_cost_threshold, pretokenized, override_config)
+            return _refine_result(results, text)
+
+        native_echo = echo or just_split
+        results = super().analyze(text, 1, match_options, native_echo, blocklist, open_ending, allowed_dialects, dialect_cost, typos, typo_cost_threshold, pretokenized, override_config)
+        return map(_refine_result_with_echo if native_echo else _refine_result, results)
 
     def tokenize(self, 
         text:Union[str, Iterable[str]], 
@@ -1496,7 +1547,8 @@ with open('result.txt', 'w', encoding='utf-8') as output:
         typos: Optional[Union[str, TypoTransformer]] = None,
         typo_cost_threshold: float = 2.5,
         override_config:Optional[KiwiConfig] = None,
-    ) -> Union[List[Token], Iterable[List[Token]], List[List[Token]], Iterable[List[List[Token]]]]:
+        just_split:bool = False,
+    ) -> Union[List[Token], Iterable[List[Token]], List[List[Token]], Iterable[List[List[Token]]], List[str], Iterable[List[str]]]:
         '''.. versionadded:: 0.10.2
 
 `analyze`와는 다르게 형태소 분석결과만 간단하게 반환합니다.
@@ -1608,6 +1660,9 @@ override_config: KiwiConfig
 
     이 분석을 수행할 때 적용할 설정값을 지정합니다. 이 인자로 지정된 설정값은 `Kiwi.global_config`의 설정값을 덮어씁니다.
     별도로 지정하지 않을 경우 `Kiwi.global_config`가 사용됩니다.
+just_split: bool
+    True인 경우 정규화된 형태소 대신 원문에서 잘라낸 표면형 문자열 목록을 반환합니다.
+    현재 ``split_sents`` 및 ``stopwords``와 함께 사용할 수 없습니다.
     
 Returns
 -------
@@ -1652,6 +1707,9 @@ Notes
  Token(form='이', tag='VCP', start=16, len=1),
  Token(form='ᆸ니다', tag='EF', start=17, len=2),
  Token(form='.', tag='SF', start=19, len=1)]
+
+>>> kiwi.tokenize("했다", just_split=True)
+['했', '다']
 
 # normalize_coda 옵션을 사용하면 
 # 덧붙은 받침 때문에 분석이 깨지는 경우를 방지할 수 있습니다.
@@ -1750,6 +1808,7 @@ Notes
                               typos=typos,
                               typo_cost_threshold=typo_cost_threshold,
                               override_config=override_config,
+                              just_split=just_split,
                               )
 
     def split_into_sents(self, 
