@@ -175,6 +175,34 @@ def test_pretokenized():
     finally:
         assert is_raised
 
+def test_token_offsets_follow_non_bmp_source():
+    kiwi = Kiwi()
+    text = 'A😀B'
+
+    def pretokenized(value):
+        return [(
+            0,
+            len(value),
+            PretokenizedToken('A', 'NNP', 0, len(value)),
+        )]
+
+    tokens = kiwi.tokenize(text, pretokenized=pretokenized)
+    assert [(token.form, token.start, token.end) for token in tokens] == [
+        ('A', 0, len(text)),
+    ]
+
+    iterable_tokens = list(kiwi.tokenize(
+        iter([text, text]),
+        pretokenized=pretokenized,
+    ))
+    assert [
+        [(token.form, token.start, token.end) for token in tokens]
+        for tokens in iterable_tokens
+    ] == [[('A', 0, len(text))], [('A', 0, len(text))]]
+
+    explicit_surrogates = '\ud800\udc00A'
+    assert kiwi.tokenize(explicit_surrogates)[-1].end == len(explicit_surrogates)
+
 def test_re_word():
     text = '{평만경(平滿景)}이 사람을 시켜 {침향(沈香)} 10냥쭝을 바쳤으므로'
 
@@ -422,6 +450,16 @@ def test_swtokenizer_tokenize_encode():
         ref_morphs = tokenizer.kiwi.tokenize(sent, normalize_coda=True, z_coda=True)
         assert [m.tagged_form for m in morphs] == [m.tagged_form for m in ref_morphs]
         assert token_ids.tolist() == ref_token_ids.tolist()
+
+    text = '😀A😀B'
+    expected_spans = [('😀', 0, 1), ('A', 1, 2), ('😀', 2, 3), ('B', 3, 4)]
+    morphs, _ = tokenizer.tokenize_encode(text)
+    assert [(m.form, m.start, m.end) for m in morphs] == expected_spans
+
+    iterable_result = list(tokenizer.tokenize_encode(iter([text])))
+    assert len(iterable_result) == 1
+    morphs, _ = iterable_result[0]
+    assert [(m.form, m.start, m.end) for m in morphs] == expected_spans
 
 def test_swtokenizer_offset():
     tokenizer = sw_tokenizer.SwTokenizer('Kiwi/tokenizers/kor.32k.json', num_workers=1)

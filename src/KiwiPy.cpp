@@ -1230,7 +1230,57 @@ inline const char* getTagStr(const POSTag tag, const u16string& form)
 	return tagToString(tag);
 }
 
-py::UniqueObj resToPyList(vector<TokenResult>&& res, const KiwiObject* kiwiObj, const shared_ptr<Kiwi>& kiwiInst, vector<py::UniqueObj>&& userValues = {})
+struct SourcePositionMap
+{
+	vector<uint32_t> supplementaryStarts;
+};
+
+inline SourcePositionMap buildSourcePositionMap(PyObject* source, size_t u16Length)
+{
+	SourcePositionMap ret;
+	const Py_ssize_t sourceLength = PyUnicode_GetLength(source);
+	if (sourceLength < 0) throw py::ExcPropagation{};
+	if (u16Length <= (size_t)sourceLength) return ret;
+
+	ret.supplementaryStarts.reserve(u16Length - sourceLength);
+	size_t u16Position = 0;
+	for (Py_ssize_t i = 0; i < sourceLength; ++i)
+	{
+		const Py_UCS4 chr = PyUnicode_ReadChar(source, i);
+		if (chr == (Py_UCS4)-1 && PyErr_Occurred()) throw py::ExcPropagation{};
+		if (chr >= 0x10000)
+		{
+			ret.supplementaryStarts.emplace_back((uint32_t)u16Position);
+			++u16Position;
+		}
+		++u16Position;
+	}
+	return ret;
+}
+
+inline uint32_t sourceU16ToPyBegin(uint64_t position, const SourcePositionMap& positionMap)
+{
+	const auto numSurrogates = lower_bound(
+		positionMap.supplementaryStarts.begin(),
+		positionMap.supplementaryStarts.end(),
+		position
+	) - positionMap.supplementaryStarts.begin();
+	return (uint32_t)(position - numSurrogates);
+}
+
+inline uint32_t sourceU16ToPyEnd(uint64_t position, const SourcePositionMap& positionMap)
+{
+	uint32_t ret = sourceU16ToPyBegin(position, positionMap);
+	if (position && binary_search(
+		positionMap.supplementaryStarts.begin(),
+		positionMap.supplementaryStarts.end(),
+		position - 1
+	)) ++ret;
+	return ret;
+}
+
+py::UniqueObj resToPyList(vector<TokenResult>&& res, const KiwiObject* kiwiObj, const shared_ptr<Kiwi>& kiwiInst,
+	const SourcePositionMap& sourcePositionMap, vector<py::UniqueObj>&& userValues = {})
 {
 	// set the following objects semi-immortal. (they are neither freed nor managed)
 	// it prevents crashes at Python3.12
@@ -1244,16 +1294,9 @@ py::UniqueObj resToPyList(vector<TokenResult>&& res, const KiwiObject* kiwiObj, 
 	{
 		py::UniqueObj rList{ PyList_New(p.first.size()) };
 		size_t jdx = 0;
-		size_t u32offset = 0;
 		const size_t resultHash = hashTokenInfo(p.first);
 		for (auto& q : p.first)
 		{
-			size_t u32chrs = 0;
-			for (auto u : q.str)
-			{
-				if ((u & 0xFC00) == 0xD800) u32chrs++;
-			}
-
 			auto tItem = py::makeNewObject<TokenObject>();
 			tItem->kiwiInst = kiwiInst;
 			tItem->_form = move(q.str);
@@ -1261,8 +1304,20 @@ py::UniqueObj resToPyList(vector<TokenResult>&& res, const KiwiObject* kiwiObj, 
 			tItem->_rawTag = q.tag;
 			tItem->resultHash = resultHash;
 			tItem->_tag = getTagStr(q.tag, tItem->_form);
-			tItem->_pos = q.position - u32offset;
-			tItem->_len = q.length - u32chrs;
+			if (sourcePositionMap.supplementaryStarts.empty())
+			{
+				tItem->_pos = q.position;
+				tItem->_len = q.length;
+			}
+			else
+			{
+				const uint32_t pyBegin = sourceU16ToPyBegin(q.position, sourcePositionMap);
+				const uint32_t pyEnd = sourceU16ToPyEnd(
+					(uint64_t)q.position + q.length, sourcePositionMap
+				);
+				tItem->_pos = pyBegin;
+				tItem->_len = pyEnd - pyBegin;
+			}
 			tItem->_wordPosition = q.wordPosition;
 			tItem->_sentPosition = q.sentPosition;
 			tItem->_subSentPosition = q.subSentPosition;
@@ -1311,7 +1366,6 @@ py::UniqueObj resToPyList(vector<TokenResult>&& res, const KiwiObject* kiwiObj, 
 			}
 
 			PyList_SetItem(rList.get(), jdx++, (PyObject*)tItem.release());
-			u32offset += u32chrs;
 		}
 		PyList_SetItem(retList.get(), idx++, py::buildPyTuple(move(rList), p.second).release());
 	}
@@ -1891,7 +1945,13 @@ auto makeFutureCarrier(std::future<FutureTy>&& future, CarriedTy&& carried)
 	return FutureCarrier<FutureTy, std::remove_reference_t<CarriedTy>>{ std::move(future), std::forward<CarriedTy>(carried) };
 }
 
-struct KiwiResIter : public py::ResultIter<KiwiResIter, vector<TokenResult>, FutureCarrier<vector<TokenResult>, vector<py::UniqueObj>>>
+struct AnalysisContext
+{
+	vector<py::UniqueObj> userValues;
+	SourcePositionMap sourcePositionMap;
+};
+
+struct KiwiResIter : public py::ResultIter<KiwiResIter, vector<TokenResult>, FutureCarrier<vector<TokenResult>, AnalysisContext>>
 {
 	py::UniqueCObj<KiwiObject> kiwi;
 	std::shared_ptr<Kiwi> kiwiInst;
@@ -1913,12 +1973,16 @@ struct KiwiResIter : public py::ResultIter<KiwiResIter, vector<TokenResult>, Fut
 		waitQueue();
 	}
 
-	py::UniqueObj buildPy(pair<vector<TokenResult>, vector<py::UniqueObj>>&& v)
+	py::UniqueObj buildPy(pair<vector<TokenResult>, AnalysisContext>&& v)
 	{
 		return py::handleExc([&]()
 		{
 			if (v.first.size() > topN) v.first.erase(v.first.begin() + topN, v.first.end());
-			return resToPyList(move(v.first), kiwi.get(), kiwiInst, move(v.second));
+			auto context = move(v.second);
+			return resToPyList(
+				move(v.first), kiwi.get(), kiwiInst,
+				context.sourcePositionMap, move(context.userValues)
+			);
 		});
 	}
 
@@ -1942,13 +2006,17 @@ struct KiwiResIter : public py::ResultIter<KiwiResIter, vector<TokenResult>, Fut
 			so = py::toCpp<py::StringWithOffset<u16string>>(next);
 			updatePretokenizedSpanToU16(pretokenized.first, so);
 		}
+		auto sourcePositionMap = buildSourcePositionMap(next.get(), so.str.size());
 		return makeFutureCarrier(
 			kiwiInst->asyncAnalyze(move(so.str), topN, 
 				options,
 				move(pretokenized.first),
 				config
 			),
-			move(pretokenized.second)
+			AnalysisContext{
+				move(pretokenized.second),
+				move(sourcePositionMap),
+			}
 		);
 	}
 };
@@ -2014,7 +2082,8 @@ inline void chrOffsetsToTokenOffsets(const vector<TokenInfo>& tokens, vector<pai
 
 using TokenEncodeResult = tuple<vector<TokenResult>, vector<uint32_t>, vector<pair<uint32_t, uint32_t>>>;
 
-struct SwTokenizerResTEIter : public py::ResultIter<SwTokenizerResTEIter, TokenEncodeResult>
+struct SwTokenizerResTEIter : public py::ResultIter<SwTokenizerResTEIter, TokenEncodeResult,
+	FutureCarrier<TokenEncodeResult, SourcePositionMap>>
 {
 	py::UniqueCObj<SwTokenizerObject> tokenizer;
 	bool returnOffsets = false;
@@ -2028,25 +2097,38 @@ struct SwTokenizerResTEIter : public py::ResultIter<SwTokenizerResTEIter, TokenE
 		waitQueue();
 	}
 
-	py::UniqueObj buildPy(TokenEncodeResult&& v)
+	py::UniqueObj buildPy(pair<TokenEncodeResult, SourcePositionMap>&& carried)
 	{
-		if (returnOffsets) return py::buildPyTuple(resToPyList(move(get<0>(v)), tokenizer->kiwi.get(), tokenizer->kiwiInst), get<1>(v), get<2>(v));
-		return py::buildPyTuple(resToPyList(move(get<0>(v)), tokenizer->kiwi.get(), tokenizer->kiwiInst), get<1>(v));
+		auto v = move(carried.first);
+		auto sourcePositionMap = move(carried.second);
+		if (returnOffsets) return py::buildPyTuple(
+			resToPyList(move(get<0>(v)), tokenizer->kiwi.get(), tokenizer->kiwiInst, sourcePositionMap),
+			get<1>(v), get<2>(v)
+		);
+		return py::buildPyTuple(
+			resToPyList(move(get<0>(v)), tokenizer->kiwi.get(), tokenizer->kiwiInst, sourcePositionMap),
+			get<1>(v)
+		);
 	}
 
-	future<TokenEncodeResult> feedNext(py::SharedObj&& next)
+	FutureTy feedNext(py::SharedObj&& next)
 	{
 		if (!PyUnicode_Check(next)) throw py::ValueError{ "`tokenize_encode` requires an instance of `str` or an iterable of `str`." };
 		auto* pool = tokenizer->kiwiInst->getThreadPool();
 		if (!pool) throw py::RuntimeError{ "async mode is unavailable in num_workers == 0" };
-		return pool->enqueue([&](size_t, const string& text)
-		{
-			vector<pair<uint32_t, uint32_t>> offsets;
-			auto res = tokenizer->kiwiInst->analyze(text, 1, Match::allWithNormalizing | Match::zCoda);
-			auto tokenIds = tokenizer->tokenizer.encode(res[0].first.data(), res[0].first.size(), returnOffsets ? &offsets : nullptr);
-			if (returnOffsets) chrOffsetsToTokenOffsets(res[0].first, offsets);
-			return make_tuple(move(res), move(tokenIds), move(offsets));
-		}, py::toCpp<string>(next));
+		auto source = py::toCpp<u16string>(next);
+		auto sourcePositionMap = buildSourcePositionMap(next.get(), source.size());
+		return makeFutureCarrier(
+			pool->enqueue([&](size_t, const u16string& text)
+			{
+				vector<pair<uint32_t, uint32_t>> offsets;
+				auto res = tokenizer->kiwiInst->analyze(text, 1, Match::allWithNormalizing | Match::zCoda);
+				auto tokenIds = tokenizer->tokenizer.encode(res[0].first.data(), res[0].first.size(), returnOffsets ? &offsets : nullptr);
+				if (returnOffsets) chrOffsetsToTokenOffsets(res[0].first, offsets);
+				return make_tuple(move(res), move(tokenIds), move(offsets));
+			}, move(source)),
+			move(sourcePositionMap)
+		);
 	}
 };
 
@@ -2127,17 +2209,23 @@ py::UniqueObj SwTokenizerObject::tokenizeAndEncode(PyObject* text, bool returnOf
 {
 	if (PyUnicode_Check(text))
 	{
+		auto source = py::toCpp<u16string>(text);
+		auto sourcePositionMap = buildSourcePositionMap(text, source.size());
 		vector<pair<uint32_t, uint32_t>> offsets;
-		auto res = kiwiInst->analyze(py::toCpp<string>(text), 1, Match::allWithNormalizing | Match::zCoda);
+		auto res = kiwiInst->analyze(source, 1, Match::allWithNormalizing | Match::zCoda);
 		auto tokenIds = tokenizer.encode(res[0].first.data(), res[0].first.size(), returnOffsets ? &offsets : nullptr);
 		if (returnOffsets)
 		{
 			chrOffsetsToTokenOffsets(res[0].first, offsets);
-			return py::buildPyTuple(resToPyList(move(res), kiwi.get(), kiwiInst), tokenIds, offsets);
+			return py::buildPyTuple(
+				resToPyList(move(res), kiwi.get(), kiwiInst, sourcePositionMap), tokenIds, offsets
+			);
 		}
 		else
 		{
-			return py::buildPyTuple(resToPyList(move(res), kiwi.get(), kiwiInst), tokenIds);
+			return py::buildPyTuple(
+				resToPyList(move(res), kiwi.get(), kiwiInst, sourcePositionMap), tokenIds
+			);
 		}
 	}
 
@@ -2365,9 +2453,12 @@ py::UniqueObj KiwiObject::analyze(PyObject* text, size_t topN,
 			so = py::toCpp<py::StringWithOffset<u16string>>(text);
 			updatePretokenizedSpanToU16(pretokenizedSpans.first, so);
 		}
+		auto sourcePositionMap = buildSourcePositionMap(text, so.str.size());
 		auto res = kiwiInst->analyze(so.str, topN, AnalyzeOption{ matchOptions, morphs, openEnding, allowedDialects, dialectCost, ptt, typoCostThreshold }, pretokenizedSpans.first, cConfig);
 		if (res.size() > topN) res.erase(res.begin() + topN, res.end());
-		return resToPyList(move(res), this, kiwiInst, move(pretokenizedSpans.second));
+		return resToPyList(
+			move(res), this, kiwiInst, sourcePositionMap, move(pretokenizedSpans.second)
+		);
 	}
 	else
 	{
